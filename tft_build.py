@@ -258,6 +258,17 @@ def aggregate_comps(records: list, min_samples: int = 3) -> list:
     return results
 
 
+def _primary_trait(participant: dict) -> str:
+    """Return e.g. '6 Piltover' for a participant, or '' if none active."""
+    active = [t for t in participant.get("traits", [])
+              if t.get("tier_current", 0) > 0 and t.get("num_units", 0) >= 2]
+    if not active:
+        return ""
+    active.sort(key=lambda t: (t.get("style", 0), t.get("num_units", 0)), reverse=True)
+    t = active[0]
+    return f"{t['num_units']} {clean_id(t['name'])}"
+
+
 def build_match_records(matches: list, players: dict) -> list:
     """Return one record per tracked-player team per match, tagged with patch."""
     records = []
@@ -298,11 +309,13 @@ def build_match_records(matches: list, players: dict) -> list:
                 "p1": {"puuid": pu1, "comp": sig1,
                        "units": participant_units(p1),
                        "augs":  [clean_id(a) for a in p1.get("augments", [])],
-                       "level": p1.get("level", 0)},
+                       "level": p1.get("level", 0),
+                       "ptrait": _primary_trait(p1)},
                 "p2": {"puuid": pu2, "comp": sig2,
                        "units": participant_units(p2),
                        "augs":  [clean_id(a) for a in p2.get("augments", [])],
-                       "level": p2.get("level", 0)},
+                       "level": p2.get("level", 0),
+                       "ptrait": _primary_trait(p2)},
             })
     records.sort(key=lambda r: (-r["max_lp"], -r["ts"]))
     return records
@@ -454,7 +467,6 @@ HTML = """<!DOCTYPE html>
 
 <div class="controls">
   <button class="tab on" onclick="setTab('matches')">Recent Games</button>
-  <button class="tab"    onclick="setTab('comps')">Comp Pairs</button>
   <button class="tab"    onclick="setTab('intel')">Trait Intel</button>
   <div class="sep"></div>
 
@@ -466,15 +478,6 @@ HTML = """<!DOCTYPE html>
     {region_options}
   </select>
 
-  <div id="tfilters">
-    <span class="flabel">Tier:</span>
-    <button class="fbtn on" data-t="ALL" onclick="setTier('ALL')">All</button>
-    <button class="fbtn" data-t="S" onclick="setTier('S')">S</button>
-    <button class="fbtn" data-t="A" onclick="setTier('A')">A</button>
-    <button class="fbtn" data-t="B" onclick="setTier('B')">B</button>
-    <button class="fbtn" data-t="C" onclick="setTier('C')">C</button>
-  </div>
-
   <span class="badge" id="badge"></span>
   <select class="ssort" id="ssort" onchange="setSort(this.value)">
     <option value="lp">Sort: Highest LP</option>
@@ -484,13 +487,13 @@ HTML = """<!DOCTYPE html>
 </div>
 
 <div id="tab-m" class="grid"></div>
-<div id="tab-c" class="grid" style="display:none"></div>
 <div id="tab-i" style="display:none">
   <div class="isubbar">
     <button class="isub on" data-s="solo"  onclick="setISub('solo')">Solo Traits</button>
     <button class="isub"    data-s="pairs" onclick="setISub('pairs')">Trait Pairs</button>
   </div>
   <div id="intel-solo"  class="grid"></div>
+  <div id="intel-detail" style="padding:0 28px 20px;display:none"></div>
   <div id="intel-pairs" class="grid" style="display:none"></div>
 </div>
 
@@ -502,8 +505,9 @@ const PATCHES      = {patches_json};
 const PLAYERS      = {players_json};
 const REGIONS      = {regions_json};
 
-let tab='matches', tier='ALL', sort='lp', rgn='ALL', curPatch=PATCHES[0]||'';
+let tab='matches', sort='lp', rgn='ALL', curPatch=PATCHES[0]||'', isub='solo', intelSort='avg', selectedTrait=null;
 const PL = ['','1st','2nd','3rd','4th'];
+const TIER_ORDER = {{'S':0,'A':1,'B':2,'C':3}};
 
 function pblock(p) {{
   const info = PLAYERS[p.puuid];
@@ -589,45 +593,23 @@ function renderComps() {{
     : '<div class="empty">No comp pairs for this tier.</div>';
 }}
 
-let isub = 'solo';
-
 function renderIntel() {{
   const ac=v=>v<=1.8?'good':v<=2.5?'ok':'bad';
   const wc=v=>v>=30?'good':v>=20?'ok':'bad';
-  const tc=v=>v>=55?'good':v>=40?'ok':'bad';
   const intel = (PATCHES_DATA[curPatch]||{{}}).intel || {{solo:[],pairs:[]}};
 
-  function distBar(d) {{
-    const [d1,d2,d3,d4] = d;
-    return `<div class="distbar">
-      <div class="db1" style="flex:${{d1||0}}" title="1st: ${{d1}}%"></div>
-      <div class="db2" style="flex:${{d2||0}}" title="2nd: ${{d2}}%"></div>
-      <div class="db3" style="flex:${{d3||0}}" title="3rd: ${{d3}}%"></div>
-      <div class="db4" style="flex:${{d4||0}}" title="4th: ${{d4}}%"></div>
-    </div>
-    <div class="distlabels">
-      <span class="dlabel">1st <b>${{d1}}%</b></span>
-      <span class="dlabel">2nd <b>${{d2}}%</b></span>
-      <span class="dlabel">3rd <b>${{d3}}%</b></span>
-      <span class="dlabel">4th <b>${{d4}}%</b></span>
-    </div>`;
-  }}
-
-  function statsRow(x) {{
-    return `<div class="srow">
-      <div class="stat"><div class="sv ${{ac(x.avg)}}">${{x.avg}}</div><div class="sl">Avg Place</div></div>
-      <div class="stat"><div class="sv ${{wc(x.win_pct)}}">${{x.win_pct}}%</div><div class="sl">Win</div></div>
-      <div class="stat"><div class="sv ${{tc(x.top2_pct)}}">${{x.top2_pct}}%</div><div class="sl">Top 2</div></div>
-      <div class="stat"><div class="sv">${{x.games}}</div><div class="sl">Games</div></div>
-    </div>`;
-  }}
-
   if (isub === 'solo') {{
-    document.getElementById('badge').textContent = intel.solo.length + ' traits';
+    let groups = [...intel.solo];
+    if (intelSort==='games') groups.sort((a,b)=>b.total_games-a.total_games);
+    else if (intelSort==='tier') groups.sort((a,b)=>TIER_ORDER[a.tier]-TIER_ORDER[b.tier]||a.best_avg-b.best_avg);
+    // default 'avg': already sorted by best_avg
+
+    document.getElementById('badge').textContent = groups.length + ' traits';
     document.getElementById('intel-solo').style.display = '';
     document.getElementById('intel-pairs').style.display = 'none';
-    document.getElementById('intel-solo').innerHTML = intel.solo.length
-      ? intel.solo.map(group => {{
+    document.getElementById('intel-solo').innerHTML = groups.length
+      ? groups.map(group => {{
+          const sel = selectedTrait === group.name;
           const cols = group.variants.map(v => {{
             const [d1,d2,d3,d4] = v.dist;
             return `<div class="pcol" style="background:var(--surface2)">
@@ -652,70 +634,131 @@ function renderIntel() {{
               <div class="urow" style="margin-top:7px">${{v.top_units.map(u=>`<span class="uchip">${{u}}</span>`).join('')}}</div>
             </div>`;
           }}).join('');
-          return `<div class="card">
+          return `<div class="card" style="cursor:pointer;${{sel?'border-color:var(--gold);':''}}"
+              onclick="selectTrait('${{group.name.replace(/'/g,"\\'")}}')">
             <div class="cbar" data-t="${{group.tier}}"></div>
             <div class="chdr">
               <div class="tbadge" data-t="${{group.tier}}">${{group.tier}}</div>
               <div class="tprimary" style="flex:1">${{group.name}}</div>
               <span class="badge">${{group.total_games}} games</span>
+              <span style="font-size:11px;color:var(--muted);margin-left:4px">${{sel?'▲':'▼'}}</span>
             </div>
             <div class="pbody" style="grid-template-columns:repeat(${{group.variants.length}},1fr)">${{cols}}</div>
           </div>`;
         }}).join('')
       : '<div class="empty">No trait data for this patch.</div>';
+
+    renderTraitDetail();
+
   }} else {{
-    document.getElementById('badge').textContent = intel.pairs.length + ' pairs';
+    const pairs = [...intel.pairs];
+    document.getElementById('badge').textContent = pairs.length + ' pairs';
     document.getElementById('intel-solo').style.display = 'none';
     document.getElementById('intel-pairs').style.display = '';
-    document.getElementById('intel-pairs').innerHTML = intel.pairs.length
-      ? intel.pairs.map(t => `
-        <div class="card">
-          <div class="chdr" style="flex-direction:column;align-items:flex-start;gap:6px">
-            <div class="pnames">
-              <span class="tprimary">${{t.trait1}}</span>
-              <span class="arrow">&#8646;</span>
-              <span class="tprimary">${{t.trait2}}</span>
+    document.getElementById('intel-detail').style.display = 'none';
+    document.getElementById('intel-pairs').innerHTML = pairs.length
+      ? pairs.map(t => {{
+          const [d1,d2,d3,d4] = t.dist;
+          return `<div class="card">
+            <div class="chdr" style="flex-direction:column;align-items:flex-start;gap:6px">
+              <div class="pnames">
+                <span class="tprimary">${{t.trait1}}</span>
+                <span class="arrow">&#8646;</span>
+                <span class="tprimary">${{t.trait2}}</span>
+              </div>
+              <div class="distbar">
+                <div class="db1" style="flex:${{d1||0.01}}"></div>
+                <div class="db2" style="flex:${{d2||0.01}}"></div>
+                <div class="db3" style="flex:${{d3||0.01}}"></div>
+                <div class="db4" style="flex:${{d4||0.01}}"></div>
+              </div>
+              <div class="distlabels">
+                <span class="dlabel">1st <b>${{d1}}%</b></span>
+                <span class="dlabel">2nd <b>${{d2}}%</b></span>
+                <span class="dlabel">3rd <b>${{d3}}%</b></span>
+                <span class="dlabel">4th <b>${{d4}}%</b></span>
+              </div>
             </div>
-            ${{distBar(t.dist)}}
-          </div>
-          ${{statsRow(t)}}
-        </div>`).join('')
+            <div class="srow">
+              <div class="stat"><div class="sv">${{t.avg}}</div><div class="sl">Avg Place</div></div>
+              <div class="stat"><div class="sv">${{t.win_pct}}%</div><div class="sl">Win</div></div>
+              <div class="stat"><div class="sv">${{t.top2_pct}}%</div><div class="sl">Top 2</div></div>
+              <div class="stat"><div class="sv">${{t.games}}</div><div class="sl">Games</div></div>
+            </div>
+          </div>`;
+        }}).join('')
       : '<div class="empty">No trait pair data for this patch.</div>';
   }}
 }}
 
+function renderTraitDetail() {{
+  const det = document.getElementById('intel-detail');
+  if (!selectedTrait) {{ det.style.display='none'; return; }}
+  const matches = (PATCHES_DATA[curPatch]||{{}}).matches || [];
+  const base = selectedTrait;
+  const filtered = matches.filter(m =>
+    (m.p1.ptrait && m.p1.ptrait.slice(m.p1.ptrait.indexOf(' ')+1) === base) ||
+    (m.p2.ptrait && m.p2.ptrait.slice(m.p2.ptrait.indexOf(' ')+1) === base)
+  );
+  filtered.sort((a,b)=>b.ts-a.ts);
+  det.style.display = '';
+  det.innerHTML = `
+    <div style="font-size:13px;font-weight:600;color:var(--gl);padding:12px 0 10px;border-top:1px solid var(--border)">
+      ${{filtered.length}} games featuring ${{base}}
+    </div>
+    <div class="grid" style="padding:0">${{
+      filtered.map(m => matchCard(m)).join('') || '<div class="empty">No games found.</div>'
+    }}</div>`;
+}}
+
+function matchCard(m) {{
+  return `<div class="card">
+    <div class="mhdr">
+      <div class="pbadge p${{m.placement}}"><div class="pdot"></div>${{PL[m.placement]||m.placement+'th'}}</div>
+      <div class="minfo">
+        <span class="patchbadge">Patch ${{m.patch}}</span>
+        <span class="gdate">${{m.game_date}}</span>
+      </div>
+    </div>
+    <div class="pbody">${{pblock(m.p1)}}${{pblock(m.p2)}}</div>
+  </div>`;
+}}
+
+function selectTrait(name) {{
+  selectedTrait = selectedTrait === name ? null : name;
+  renderIntel();
+}}
+
 function setISub(v) {{
   isub = v;
+  selectedTrait = null;
   document.querySelectorAll('.isub').forEach(b => b.classList.toggle('on', b.dataset.s === v));
   renderIntel();
 }}
 
 function setTab(t) {{
   tab = t;
-  document.querySelectorAll('.tab').forEach((b,i)=>b.classList.toggle('on',['matches','comps','intel'][i]===t));
+  document.querySelectorAll('.tab').forEach((b,i)=>b.classList.toggle('on',['matches','intel'][i]===t));
   document.getElementById('tab-m').style.display = t==='matches'?'':'none';
-  document.getElementById('tab-c').style.display = t==='comps'?'':'none';
   document.getElementById('tab-i').style.display = t==='intel'?'':'none';
-  document.getElementById('tfilters').style.display = t==='comps'?'flex':'none';
-  document.getElementById('ssort').style.display = t==='intel'?'none':'';
   const s = document.getElementById('ssort');
   if (t==='matches') {{
     s.innerHTML = `<option value="lp">Sort: Highest LP</option>
        <option value="place">Sort: Best Placement</option>
        <option value="recent">Sort: Most Recent</option>`;
     sort = 'lp';
-  }} else if (t==='comps') {{
-    s.innerHTML = `<option value="avg">Sort: Avg Placement</option>`;
-    sort = 'avg';
+  }} else {{
+    s.innerHTML = `<option value="avg">Sort: Best Avg</option>
+       <option value="tier">Sort: Tier (S→C)</option>
+       <option value="games">Sort: Most Games</option>`;
+    intelSort = 'avg';
   }}
   render();
 }}
-function setTier(v){{tier=v;document.querySelectorAll('.fbtn').forEach(b=>b.classList.remove('on'));
-  document.querySelector(`[data-t="${{v}}"]`).classList.add('on');render();}}
-function setSort(v){{sort=v;render();}}
+function setSort(v) {{ if(tab==='matches') sort=v; else intelSort=v; render(); }}
 function setRegion(v){{rgn=v;render();}}
-function setPatch(v){{curPatch=v;render();}}
-function render(){{tab==='matches'?renderMatches():tab==='comps'?renderComps():renderIntel();}}
+function setPatch(v){{curPatch=v;selectedTrait=null;render();}}
+function render(){{tab==='matches'?renderMatches():renderIntel();}}
 render();
 </script>
 </body>
@@ -785,20 +828,11 @@ def main():
     for p in patches:
         p_recs = [r for r in all_records       if r["patch"] == p]
         p_mats = [r for r in all_match_records if r["patch"] == p]
-        comps  = aggregate_comps(p_recs, min_samples=args.min_samples)
         intel  = aggregate_trait_intel(p_recs, min_games=args.min_samples)
-        patches_data[p] = {"comps": comps, "matches": p_mats, "intel": intel}
+        patches_data[p] = {"matches": p_mats, "intel": intel}
 
-        n_games = len(p_mats)
-        print(f"  Patch {p}: {n_games} game records, {len(comps)} comp pairs", end="")
-        tier_summary = "  ".join(
-            f"{t}:{sum(1 for c in comps if c['tier']==t)}"
-            for t in ["S","A","B","C"]
-            if any(c["tier"]==t for c in comps)
-        )
-        if tier_summary:
-            print(f"  ({tier_summary})", end="")
-        print()
+        n_groups = len(intel["solo"])
+        print(f"  Patch {p}: {len(p_mats)} game records, {n_groups} trait groups")
 
     # Region dropdown options
     regions_in_data = sorted({v.get("region", "?") for v in data["players"].values()})
