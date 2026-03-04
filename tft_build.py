@@ -132,27 +132,28 @@ def process_matches(matches: list) -> list:
     return records
 
 
-def aggregate_trait_intel(records: list, min_games: int = 3) -> dict:
+def aggregate_trait_intel(match_records: list, min_games: int = 3) -> dict:
     """
-    From pair records, produce:
+    From tracked-player match records (build_match_records output), produce:
       solo  — traits grouped by base name (e.g. "4 Piltover" + "6 Piltover" → "Piltover"),
               each variant includes top units
       pairs — per (trait1, trait2) Double Up synergy stats
+    Counts match exactly what the detail panel shows — tracked players only.
     """
     solo_pls:   dict = defaultdict(list)
     solo_units: dict = defaultdict(Counter)
     pair_pls:   dict = defaultdict(list)
 
-    for r in records:
-        lab1 = f"{r['traits1'][0]['count']} {r['traits1'][0]['name']}" if r["traits1"] else ""
-        lab2 = f"{r['traits2'][0]['count']} {r['traits2'][0]['name']}" if r["traits2"] else ""
+    for r in match_records:
+        lab1 = r["p1"].get("ptrait", "")
+        lab2 = r["p2"].get("ptrait", "")
         pl   = r["placement"]
         if lab1:
             solo_pls[lab1].append(pl)
-            for u in r["units1"]: solo_units[lab1][u] += 1
+            for u in r["p1"]["units"]: solo_units[lab1][u] += 1
         if lab2:
             solo_pls[lab2].append(pl)
-            for u in r["units2"]: solo_units[lab2][u] += 1
+            for u in r["p2"]["units"]: solo_units[lab2][u] += 1
         if lab1 and lab2:
             pair_pls[tuple(sorted([lab1, lab2]))].append(pl)
 
@@ -517,10 +518,12 @@ function pblock(p) {{
        <span class="rgchip">${{info.region}}</span>`
     : `<span class="punknown">Ally</span>`;
   const lv = p.level ? `<span class="lvchip">Lv ${{p.level}}</span>` : '';
+  const pt = p.ptrait ? `<div style="font-size:13px;font-weight:700;color:var(--gl);margin-bottom:5px">${{p.ptrait}}</div>` : '';
   const au = p.augs.length
     ? `<div class="arow">${{p.augs.map(a=>`<span class="achip">${{a}}</span>`).join('')}}</div>` : '';
   return `<div class="pcol">
     <div class="prow">${{nm}}${{lv}}</div>
+    ${{pt}}
     <div class="clabel">${{p.comp}}</div>
     <div class="urow">${{p.units.map(u=>`<span class="uchip">${{u}}</span>`).join('')}}</div>
     ${{au}}</div>`;
@@ -828,7 +831,7 @@ def main():
     for p in patches:
         p_recs = [r for r in all_records       if r["patch"] == p]
         p_mats = [r for r in all_match_records if r["patch"] == p]
-        intel  = aggregate_trait_intel(p_recs, min_games=args.min_samples)
+        intel  = aggregate_trait_intel(p_mats, min_games=args.min_samples)
         patches_data[p] = {"matches": p_mats, "intel": intel}
 
         n_groups = len(intel["solo"])
