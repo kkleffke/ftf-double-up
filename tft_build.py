@@ -135,12 +135,13 @@ def process_matches(matches: list) -> list:
 def aggregate_trait_intel(records: list, min_games: int = 3) -> dict:
     """
     From pair records, produce:
-      solo  — per-primary-trait stats (one entry per player per record)
+      solo  — traits grouped by base name (e.g. "4 Piltover" + "6 Piltover" → "Piltover"),
+              each variant includes top units
       pairs — per (trait1, trait2) Double Up synergy stats
-    Primary trait = top active trait by (style, num_units) from comp_signature output.
     """
-    solo_pls: dict = defaultdict(list)
-    pair_pls: dict = defaultdict(list)
+    solo_pls:   dict = defaultdict(list)
+    solo_units: dict = defaultdict(Counter)
+    pair_pls:   dict = defaultdict(list)
 
     for r in records:
         lab1 = f"{r['traits1'][0]['count']} {r['traits1'][0]['name']}" if r["traits1"] else ""
@@ -148,8 +149,10 @@ def aggregate_trait_intel(records: list, min_games: int = 3) -> dict:
         pl   = r["placement"]
         if lab1:
             solo_pls[lab1].append(pl)
+            for u in r["units1"]: solo_units[lab1][u] += 1
         if lab2:
             solo_pls[lab2].append(pl)
+            for u in r["units2"]: solo_units[lab2][u] += 1
         if lab1 and lab2:
             pair_pls[tuple(sorted([lab1, lab2]))].append(pl)
 
@@ -167,15 +170,28 @@ def aggregate_trait_intel(records: list, min_games: int = 3) -> dict:
             "dist":     dist,
         }
 
-    solo = sorted(
-        [{"trait": lab, **make_stats(pls)} for lab, pls in solo_pls.items() if len(pls) >= min_games],
-        key=lambda x: (x["avg"], -x["win_pct"]),
-    )
+    # Build variant list, group by base trait name
+    variants = [
+        {"trait": lab, "top_units": [u for u, _ in solo_units[lab].most_common(8)],
+         **make_stats(pls)}
+        for lab, pls in solo_pls.items() if len(pls) >= min_games
+    ]
+    groups_dict: dict = defaultdict(list)
+    for v in variants:
+        base = " ".join(v["trait"].split()[1:])   # "6 Piltover" → "Piltover"
+        groups_dict[base].append(v)
+
+    grouped = []
+    for base, vs in groups_dict.items():
+        vs.sort(key=lambda x: int(x["trait"].split()[0]))   # 4 → 6 → 8
+        grouped.append({"name": base, "variants": vs, "best_avg": min(v["avg"] for v in vs)})
+    grouped.sort(key=lambda g: g["best_avg"])
+
     pairs = sorted(
         [{"trait1": k[0], "trait2": k[1], **make_stats(pls)} for k, pls in pair_pls.items() if len(pls) >= min_games],
         key=lambda x: (x["avg"], -x["win_pct"]),
     )
-    return {"solo": solo, "pairs": pairs}
+    return {"solo": grouped, "pairs": pairs}
 
 
 def aggregate_comps(records: list, min_samples: int = 3) -> list:
@@ -597,14 +613,36 @@ function renderIntel() {{
     document.getElementById('intel-solo').style.display = '';
     document.getElementById('intel-pairs').style.display = 'none';
     document.getElementById('intel-solo').innerHTML = intel.solo.length
-      ? intel.solo.map(t => `
-        <div class="card">
-          <div class="chdr" style="flex-direction:column;align-items:flex-start;gap:6px">
-            <div class="tprimary">${{t.trait}}</div>
-            ${{distBar(t.dist)}}
-          </div>
-          ${{statsRow(t)}}
-        </div>`).join('')
+      ? intel.solo.map(group => {{
+          const cols = group.variants.map(v => {{
+            const [d1,d2,d3,d4] = v.dist;
+            return `<div class="pcol" style="background:var(--surface2)">
+              <div style="font-size:12px;font-weight:700;color:var(--gl);margin-bottom:7px">${{v.trait}}</div>
+              <div class="distbar">
+                <div class="db1" style="flex:${{d1||0.01}}" title="1st: ${{d1}}%"></div>
+                <div class="db2" style="flex:${{d2||0.01}}" title="2nd: ${{d2}}%"></div>
+                <div class="db3" style="flex:${{d3||0.01}}" title="3rd: ${{d3}}%"></div>
+                <div class="db4" style="flex:${{d4||0.01}}" title="4th: ${{d4}}%"></div>
+              </div>
+              <div class="distlabels">
+                <span class="dlabel">1st <b>${{d1}}%</b></span>
+                <span class="dlabel">2nd <b>${{d2}}%</b></span>
+                <span class="dlabel">3rd <b>${{d3}}%</b></span>
+                <span class="dlabel">4th <b>${{d4}}%</b></span>
+              </div>
+              <div style="font-size:11px;color:var(--muted);margin-top:5px">
+                Avg <b class="${{ac(v.avg)}}">${{v.avg}}</b> &middot;
+                Win <b class="${{wc(v.win_pct)}}">${{v.win_pct}}%</b> &middot;
+                <b>${{v.games}}</b> games
+              </div>
+              <div class="urow" style="margin-top:7px">${{v.top_units.map(u=>`<span class="uchip">${{u}}</span>`).join('')}}</div>
+            </div>`;
+          }}).join('');
+          return `<div class="card">
+            <div class="chdr"><div class="tprimary">${{group.name}}</div></div>
+            <div class="pbody" style="grid-template-columns:repeat(${{group.variants.length}},1fr)">${{cols}}</div>
+          </div>`;
+        }}).join('')
       : '<div class="empty">No trait data for this patch.</div>';
   }} else {{
     document.getElementById('badge').textContent = intel.pairs.length + ' pairs';
