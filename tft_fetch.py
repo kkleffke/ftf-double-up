@@ -163,7 +163,7 @@ def fetch_region(
     platform  = REGION_TO_PLATFORM.get(region, "europe")
     opgg_rgn  = OPGG_REGION.get(region, region.rstrip("1"))
 
-    # ── Leaderboard ──
+    # ── Leaderboard — combine all three tiers so we get the true top N ──
     print(f"\n  [{region.upper()}] Leaderboard …", end=" ", flush=True)
     entries = []
     source  = "Double Up"
@@ -171,17 +171,15 @@ def fetch_region(
         url  = f"https://{region}.api.riotgames.com/tft/league/v1/{tier}?queue={DOUBLE_UP_QUEUE}"
         data = api_get(url, api_key)
         if data and data.get("entries"):
-            entries = data["entries"]
-            break
+            entries.extend(data["entries"])
     if not entries:
         source = "Standard TFT (fallback)"
         print("no Double Up ladder, using standard TFT … ", end="", flush=True)
-        for tier in ("challenger", "grandmaster"):
+        for tier in ("challenger", "grandmaster", "master"):
             url  = f"https://{region}.api.riotgames.com/tft/league/v1/{tier}?queue=RANKED_TFT"
             data = api_get(url, api_key)
             if data and data.get("entries"):
-                entries = data["entries"]
-                break
+                entries.extend(data["entries"])
     if not entries:
         print("SKIP (no data)")
         return {}, []
@@ -244,27 +242,35 @@ def fetch_region(
     return players, new_ids
 
 
-def fetch_matches(match_ids: list[str], region: str, api_key: str, patch: str = "") -> dict:
+_PARTICIPANT_DROP = {"missions", "companion", "gold_left", "players_eliminated",
+                     "time_eliminated", "total_damage_to_players"}
+
+def slim_match(match: dict) -> dict:
+    """Strip unused per-participant fields to reduce storage size."""
+    info = match.get("info", {})
+    slim_participants = []
+    for p in info.get("participants", []):
+        slim_participants.append({k: v for k, v in p.items() if k not in _PARTICIPANT_DROP})
+    return {
+        "metadata": match.get("metadata", {}),
+        "info": {**info, "participants": slim_participants},
+    }
+
+
+def fetch_matches(match_ids: list[str], region: str, api_key: str) -> dict:
     platform = REGION_TO_PLATFORM.get(region, "europe")
     matches: dict = {}
-    skipped = 0
     total = len(match_ids)
     if not total:
         return matches
-    label = f" (patch {patch} only)" if patch else ""
-    print(f"  Fetching {total} matches{label} …")
+    print(f"  Fetching {total} matches …")
     for i, mid in enumerate(match_ids, 1):
         url = f"https://{platform}.api.riotgames.com/tft/match/v1/matches/{mid}"
         m   = api_get(url, api_key)
         if m:
-            if patch and _match_patch(m) != patch:
-                skipped += 1
-            else:
-                matches[mid] = m
+            matches[mid] = slim_match(m)
         if i % 25 == 0 or i == total:
-            print(f"    [{i:>4}/{total}] kept {len(matches)}  skipped {skipped}", flush=True)
-    if skipped:
-        print(f"  ({skipped} matches discarded — wrong patch)")
+            print(f"    [{i:>4}/{total}] kept {len(matches)}", flush=True)
     return matches
 
 
@@ -279,8 +285,8 @@ def main():
                         help="Comma-separated regions (default: euw1,na1,kr)")
     parser.add_argument("--players",  type=int, default=25,
                         help="Top players per region (default: 25)")
-    parser.add_argument("--matches",  type=int, default=20,
-                        help="Matches per player (default: 20)")
+    parser.add_argument("--matches",  type=int, default=100,
+                        help="Matches per player (default: 100, max 200)")
     parser.add_argument("--output",   default="tft_data.json")
     parser.add_argument("--update",   action="store_true",
                         help="Add only new data to an existing file")
@@ -307,6 +313,7 @@ def main():
     print("\nDetecting current patch …", end=" ", flush=True)
     patch = get_current_patch()
     print(f"patch {patch}" if patch else "could not detect")
+    print(f"(matches from all patches will be stored; build script handles patch filtering)")
 
     all_players  = dict(existing["players"])
     all_matches  = dict(existing["matches"])
@@ -319,7 +326,7 @@ def main():
         )
         all_players.update(players)
 
-        new_matches = fetch_matches(new_ids, region, args.api_key, patch)
+        new_matches = fetch_matches(new_ids, region, args.api_key)
         all_matches.update(new_matches)
         known_ids.update(new_matches.keys())
         print(f"  [{region.upper()}] Region complete.  Running total: {len(all_matches)} matches")
