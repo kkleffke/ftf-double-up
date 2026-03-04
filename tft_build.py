@@ -184,7 +184,21 @@ def aggregate_trait_intel(records: list, min_games: int = 3) -> dict:
     grouped = []
     for base, vs in groups_dict.items():
         vs.sort(key=lambda x: int(x["trait"].split()[0]))   # 4 → 6 → 8
-        grouped.append({"name": base, "variants": vs, "best_avg": min(v["avg"] for v in vs)})
+        total_games = sum(v["games"] for v in vs)
+        g_avg  = sum(v["avg"]      * v["games"] for v in vs) / total_games
+        g_win  = sum(v["win_pct"]  * v["games"] for v in vs) / total_games / 100
+        g_top2 = sum(v["top2_pct"] * v["games"] for v in vs) / total_games / 100
+        tier = (
+            "S" if g_avg <= 1.8 and g_win  >= 0.25 else
+            "A" if g_avg <= 2.3 and g_top2 >= 0.55 else
+            "B" if g_avg <= 3.0 else
+            "C"
+        )
+        grouped.append({
+            "name": base, "variants": vs,
+            "best_avg": min(v["avg"] for v in vs),
+            "total_games": total_games, "tier": tier,
+        })
     grouped.sort(key=lambda g: g["best_avg"])
 
     pairs = sorted(
@@ -639,7 +653,12 @@ function renderIntel() {{
             </div>`;
           }}).join('');
           return `<div class="card">
-            <div class="chdr"><div class="tprimary">${{group.name}}</div></div>
+            <div class="cbar" data-t="${{group.tier}}"></div>
+            <div class="chdr">
+              <div class="tbadge" data-t="${{group.tier}}">${{group.tier}}</div>
+              <div class="tprimary" style="flex:1">${{group.name}}</div>
+              <span class="badge">${{group.total_games}} games</span>
+            </div>
             <div class="pbody" style="grid-template-columns:repeat(${{group.variants.length}},1fr)">${{cols}}</div>
           </div>`;
         }}).join('')
